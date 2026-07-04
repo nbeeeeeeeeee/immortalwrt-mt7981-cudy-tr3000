@@ -1,0 +1,19 @@
+- name: Check package exists
+  working-directory: /workdir/openwrt
+  run: |
+    echo "===== CHECK PACKAGE ====="
+
+    grep -R "KernelPackage/sched-bpf" package feeds target || true
+    grep -R "KernelPackage/xdp-sockets-diag" package feeds target || true
+
+    echo "===== CHECK KCONFIG ====="
+
+    grep -R "XDP_SOCKETS" package feeds target || true
+
+    echo "===== MENUCONFIG SEARCH ====="
+
+    make defconfig
+
+    grep XDP_SOCKETS .config || true
+    grep sched-bpf .config || true
+    grep xdp-sockets-diag .config || true
