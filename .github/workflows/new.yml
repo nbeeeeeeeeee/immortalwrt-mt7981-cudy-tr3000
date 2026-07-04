@@ -23,8 +23,10 @@ permissions:
   contents: write
 
 env:
-  TZ: Asia/Shanghai
   REPO_BRANCH: openwrt-24.10-6.6
+  TZ: Asia/Shanghai
+  CCACHE_DIR: /workdir/.ccache
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   build:
@@ -33,15 +35,6 @@ jobs:
     steps:
       - name: Checkout workflow repo
         uses: actions/checkout@v4
-
-      - name: Init environment
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses-dev \
-            libssl-dev python3 python3-dev python3-setuptools rsync swig \
-            unzip zlib1g-dev file wget curl libelf-dev ccache
 
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -54,56 +47,83 @@ jobs:
           docker-images: true
           swap-storage: true
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev \
+            libssl-dev python3 python3-dev python3-setuptools rsync swig \
+            unzip zlib1g-dev file wget curl libelf-dev ccache
+
+      - name: Prepare workdir
+        run: |
+          sudo mkdir -p /workdir
+          sudo chown "$USER":"$USER" /workdir
+
       - name: Clone source
+        working-directory: /workdir
         run: |
           git clone --single-branch --branch "$REPO_BRANCH" \
             --filter=blob:none "${{ inputs.repo }}" openwrt
           cd openwrt
-          git checkout "${{ inputs.commit }}"
+          if [ -n "${{ inputs.commit }}" ]; then
+            git checkout "${{ inputs.commit }}"
+          fi
+          ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
 
       - name: Update feeds
-        working-directory: openwrt
+        working-directory: /workdir/openwrt
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Load config and force kmods as modules
-        working-directory: openwrt
+      - name: Load config and force modules
+        working-directory: /workdir/openwrt
         run: |
-          cp -f "../${{ inputs.config_path }}" .config
+          cp -f "$GITHUB_WORKSPACE/${{ inputs.config_path }}" .config
+          make defconfig
 
-          # 关键：必须是 m，才能生成独立 ipk
+          # 强制改成模块，确保生成独立 ipk
           sed -i \
+            -e 's/^# CONFIG_KERNEL_XDP_SOCKETS is not set/CONFIG_KERNEL_XDP_SOCKETS=y/' \
             -e 's/^CONFIG_KERNEL_XDP_SOCKETS=.*/CONFIG_KERNEL_XDP_SOCKETS=y/' \
+            -e 's/^# CONFIG_PACKAGE_kmod-sched-bpf is not set/CONFIG_PACKAGE_kmod-sched-bpf=m/' \
             -e 's/^CONFIG_PACKAGE_kmod-sched-bpf=.*/CONFIG_PACKAGE_kmod-sched-bpf=m/' \
+            -e 's/^# CONFIG_PACKAGE_kmod-xdp-sockets-diag is not set/CONFIG_PACKAGE_kmod-xdp-sockets-diag=m/' \
             -e 's/^CONFIG_PACKAGE_kmod-xdp-sockets-diag=.*/CONFIG_PACKAGE_kmod-xdp-sockets-diag=m/' \
             .config
 
-          make defconfig
+          echo "===== FINAL CONFIG CHECK ====="
+          grep -E 'CONFIG_KERNEL_XDP_SOCKETS|CONFIG_PACKAGE_kmod-sched-bpf|CONFIG_PACKAGE_kmod-xdp-sockets-diag' .config || true
 
-          echo "===== CHECK CONFIG ====="
-          grep -E "CONFIG_KERNEL_XDP_SOCKETS|CONFIG_PACKAGE_kmod-sched-bpf|CONFIG_PACKAGE_kmod-xdp-sockets-diag" .config || true
+      - name: Build tools and toolchain
+        working-directory: /workdir/openwrt
+        run: |
+          export FORCE_UNSAFE_CONFIGURE=1
+          make tools/install -j$(nproc) V=s
+          make toolchain/install -j$(nproc) V=s
 
-      - name: Build only the two kmod packages
-        working-directory: openwrt
+      - name: Build kmod packages
+        working-directory: /workdir/openwrt
         run: |
           export FORCE_UNSAFE_CONFIGURE=1
           make -j1 V=s package/kernel/linux/compile
 
-      - name: Collect target ipk files
+      - name: Collect ipk artifacts
         run: |
-          mkdir -p firmware_collection
-          find openwrt/bin/packages -type f \( \
+          mkdir -p /workdir/output
+          find /workdir/openwrt/bin -type f \( \
             -name "kmod-sched-bpf*.ipk" -o \
             -name "kmod-xdp-sockets-diag*.ipk" \
-          \) -exec cp -v {} firmware_collection/ \;
+          \) -exec cp -v {} /workdir/output/ \;
 
-          echo "Collected files:"
-          ls -lh firmware_collection || true
+          echo "Collected:"
+          ls -lh /workdir/output || true
 
-      - name: Upload IPK artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kmod-ipk
-          path: firmware_collection/*
+          path: /workdir/output/*
           if-no-files-found: error
