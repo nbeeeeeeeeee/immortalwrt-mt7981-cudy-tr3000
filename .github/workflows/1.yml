@@ -1,19 +1,34 @@
-- name: Check package exists
-  working-directory: /workdir/openwrt
-  run: |
-    echo "===== CHECK PACKAGE ====="
+name: Check BPF Packages
 
-    grep -R "KernelPackage/sched-bpf" package feeds target || true
-    grep -R "KernelPackage/xdp-sockets-diag" package feeds target || true
+on:
+  workflow_dispatch:
 
-    echo "===== CHECK KCONFIG ====="
+jobs:
+  check:
+    runs-on: ubuntu-22.04
 
-    grep -R "XDP_SOCKETS" package feeds target || true
+    steps:
+      - uses: actions/checkout@v4
 
-    echo "===== MENUCONFIG SEARCH ====="
+      - name: Clone source
+        run: |
+          git clone https://github.com/padavanonly/immortalwrt-mt798x-6.6 openwrt
 
-    make defconfig
+      - name: Update feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    grep XDP_SOCKETS .config || true
-    grep sched-bpf .config || true
-    grep xdp-sockets-diag .config || true
+      - name: Check package exists
+        working-directory: openwrt
+        run: |
+          echo "===== CHECK PACKAGE ====="
+
+          grep -R "KernelPackage/sched-bpf" package feeds target || true
+
+          grep -R "KernelPackage/xdp-sockets-diag" package feeds target || true
+
+          echo "===== CHECK KCONFIG ====="
+
+          grep -R "XDP_SOCKETS" package feeds target || true
